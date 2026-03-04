@@ -37,38 +37,29 @@ SHEET_VOTE_SUMMARY = "Resumen"
 
 def get_authorized_google_client():
     """
-    Handles authentication with Google API using Service Account credentials.
-    Priority: Local key.json file > Environment variable MD_SVC.
+    Handles authentication with Google API using Service Account credentials from Environment Variables.
     """
     if not SPREADSHEET_ID:
-        raise HTTPException(status_code=500, detail="SPREADSHEET_ID is missing from server configuration.")
+        raise HTTPException(status_code=500, detail="SPREADSHEET_ID is missing.")
     
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        raise HTTPException(status_code=500, detail="MD_SVC credentials are missing.")
+
     authorization_scopes = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # 1. Attempt using local key.json (Ideal for local development)
-    local_credentials_path = os.path.join(project_root_directory, "key.json")
-    if os.path.exists(local_credentials_path):
-        try:
-            return gspread.service_account(filename=local_credentials_path).open_by_key(SPREADSHEET_ID)
-        except Exception as auth_error:
-            print(f"DEBUG: Local authentication file error: {auth_error}")
-
-    # 2. Attempt using environment variable (Ideal for Cloud/Vercel)
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
-        try:
-            # Clean string format (handle single/double quotes from .env)
-            cleaned_json_data = GOOGLE_SERVICE_ACCOUNT_JSON.strip("'").strip('"')
-            credentials_dictionary = json.loads(cleaned_json_data)
-            authorized_creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dictionary, authorization_scopes)
-            google_sheets_client = gspread.authorize(authorized_creds)
-            return google_sheets_client.open_by_key(SPREADSHEET_ID)
-        except Exception as env_error:
-            print(f"DEBUG: Cloud environment authentication error: {env_error}")
-    
-    raise Exception("Critical: Could not establish a connection with Google Sheets API.")
+    try:
+        # Clean string format (handle single/double quotes from .env)
+        cleaned_json_data = GOOGLE_SERVICE_ACCOUNT_JSON.strip("'").strip('"')
+        credentials_dictionary = json.loads(cleaned_json_data)
+        authorized_creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dictionary, authorization_scopes)
+        google_sheets_client = gspread.authorize(authorized_creds)
+        return google_sheets_client.open_by_key(SPREADSHEET_ID)
+    except Exception as error:
+        print(f"CRITICAL: Authentication error: {error}")
+        raise Exception(f"Could not establish a connection with Google Sheets API: {error}")
 
 def get_target_voting_month(spreadsheet_document):
     """

@@ -1,33 +1,14 @@
-# Node
 node_modules/
-frontend/node_modules/
 dist/
-
-# Python
-venv/
-.venv/
-backend/venv/
-__pycache__/
-backend/__pycache__/
-*.py[cod]
-
-# Secretos y Credenciales
+.vercel/
 .env
-backend/.env
 *.json
 !package.json
 !package-lock.json
 !vercel.json
 key.json
-backend/key.json
-backend/api/key.json
-credentials.py
-backend/api/credentials.py
-
-# Assets de ejemplo (No subir al repo)
+api/key.json
+api/credentials.py
+venv/
+__pycache__/
 examples/
-
-# Otros
-.DS_Store
-.vscode/
-.vercel/
