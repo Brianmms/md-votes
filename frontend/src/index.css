@@ -1,0 +1,10 @@
+/* Reset default Vite styles that interfere with layout */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-width: 100%;
+}

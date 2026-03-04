@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+requests
+python-multipart
+beautifulsoup4
+gspread
+oauth2client
+python-dotenv
