@@ -12,3 +12,7 @@ api/credentials.py
 venv/
 __pycache__/
 examples/
+venv_tests/
+requirements-dev.txt
+tests/.pytest_cache/
+.vitest/
