@@ -1,6 +1,8 @@
 import os
 import json
 import traceback
+import unicodedata
+import re
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,263 +11,171 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 
-# --- CONFIGURATION AND INITIALIZATION ---
+# --- CONFIGURATION ---
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(project_root, ".env"))
 
-# Locate the project root to find the .env and key.json files
-project_root_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(project_root_directory, ".env"))
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app = FastAPI(title="Mundo Donghua Voting API", description="Backend service for managing sponsorship votes via Google Sheets")
-
-# Enable CORS for frontend communication
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Spreadsheet Configuration Constants
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "").strip()
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "").strip().strip("'").strip('"')
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("MD_SVC")
 
-# Sheet Names (Pestañas del Excel)
-SHEET_MASTER_LIST = "ListaDeDonghuas"
-SHEET_VOTING_LOG = "Votaciones"
-SHEET_CONFIG_SETTINGS = "Configuracion"
-SHEET_VOTE_SUMMARY = "Resumen"
+def normalize(text):
+    if not text: return ""
+    text = str(text).strip().lower()
+    # Remove accents/tildes
+    return "".join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
-def get_authorized_google_client():
-    """
-    Handles authentication with Google API using Service Account credentials from Environment Variables.
-    """
-    if not SPREADSHEET_ID:
-        raise HTTPException(status_code=500, detail="SPREADSHEET_ID is missing.")
-    
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise HTTPException(status_code=500, detail="MD_SVC credentials are missing.")
-
-    authorization_scopes = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
+def get_spreadsheet():
+    auth_scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # Clean string format (handle single/double quotes from .env)
-        cleaned_json_data = GOOGLE_SERVICE_ACCOUNT_JSON.strip("'").strip('"')
-        credentials_dictionary = json.loads(cleaned_json_data)
-        authorized_creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dictionary, authorization_scopes)
-        google_sheets_client = gspread.authorize(authorized_creds)
-        return google_sheets_client.open_by_key(SPREADSHEET_ID)
-    except Exception as error:
-        print(f"CRITICAL: Authentication error: {error}")
-        raise Exception(f"Could not establish a connection with Google Sheets API: {error}")
+        json_content = GOOGLE_SERVICE_ACCOUNT_JSON.strip().strip("'").strip('"')
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_content), auth_scopes)
+        return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
+    except Exception as e:
+        raise Exception(f"Google Auth Error: {e}")
 
-def get_target_voting_month(spreadsheet_document):
-    """
-    Reads the 'Mes Activo' variable from the Configuration sheet.
-    Falls back to current system month if not configured.
-    """
+def fetch_app_config():
+    config = {"active_month": datetime.now().strftime("%Y-%m"), "is_voting_enabled": True, "show_results": True, "can_edit_votes": True, "edit_deadline": ""}
     try:
-        settings_sheet = spreadsheet_document.worksheet(SHEET_CONFIG_SETTINGS)
-        all_settings = settings_sheet.get_all_records()
-        for setting in all_settings:
-            if setting.get("Variable") == "Mes Activo":
-                return str(setting.get("Valor"))
-    except Exception:
-        pass
-    return datetime.now().strftime("%Y-%m")
+        doc = get_spreadsheet()
+        sheet = doc.worksheet("Configuracion")
+        # get_all_values is more robust than get_all_records for mixed formats
+        all_rows = sheet.get_all_values()
+        now = datetime.now()
 
-class VoteSubmissionSchema(BaseModel):
-    """Validation schema for incoming vote data."""
+        for row in all_rows:
+            if len(row) < 2: continue
+            
+            # Normalize column A (Variable name)
+            var_name = normalize(row[0])
+            var_val = str(row[1]).strip()
+
+            if var_name == "mes activo":
+                config["active_month"] = var_val
+            elif var_name == "habilitar encuesta":
+                config["is_voting_enabled"] = (var_val.lower() == "si")
+            elif var_name == "mostrar votaciones":
+                config["show_results"] = (var_val.lower() == "si")
+            elif var_name == "fecha limite edicion":
+                config["edit_deadline"] = var_val
+                # Extract date components ignoring separators
+                # Supports YYYY-MM-DD, DD-MM-YYYY, etc.
+                match = re.search(r"(\d{1,4})[-/.](\d{1,2})[-/.](\d{1,4})", var_val)
+                if match:
+                    parts = [int(p) for p in match.groups()]
+                    try:
+                        # Try YYYY-MM-DD
+                        if parts[0] > 1000: deadline = datetime(parts[0], parts[1], parts[2])
+                        # Try DD-MM-YYYY
+                        else: deadline = datetime(parts[2], parts[1], parts[0])
+                        
+                        if now.date() > deadline.date():
+                            config["can_edit_votes"] = False
+                    except: pass
+        print(f"DEBUG CONFIG: {config}")
+    except Exception as e:
+        print(f"Config error: {e}")
+    return config
+
+class VoteSchema(BaseModel):
     email: str
     nick: str
     tier: str
-    votes: dict # Key: Series Name, Value: Points assigned
+    votes: dict
     overwrite: bool = False
 
-# --- API ENDPOINTS ---
+@app.get("/api/config")
+@app.get("/config")
+async def get_config(): return fetch_app_config()
 
 @app.get("/api/donghuas")
 @app.get("/donghuas")
-async def fetch_donghua_catalog():
-    """Retrieves the current list of series from the master sheet."""
+async def get_donghuas():
     try:
-        spreadsheet = get_authorized_google_client()
-        catalog_sheet = spreadsheet.worksheet(SHEET_MASTER_LIST)
-        sheet_rows = catalog_sheet.get_all_values()
-        
-        if len(sheet_rows) <= 1:
-            return []
-
-        # Skip header row and map columns: [ID, Name, ImageURL]
-        return [
-            {
-                "id": row[0] or f"auto-{index}",
-                "name": row[1],
-                "img": row[2] if len(row) > 2 else ""
-            } for index, row in enumerate(sheet_rows[1:])
-        ]
-    except Exception as error:
-        print(f"ERROR fetching donghuas: {error}")
-        return []
+        doc = get_spreadsheet()
+        sheet = doc.worksheet("ListaDeDonghuas")
+        data = sheet.get_all_values()
+        return [{"id": r[0] or f"id-{i}", "name": r[1], "img": r[2] if len(r)>2 else ""} for i, r in enumerate(data[1:])] if len(data)>1 else []
+    except: return []
 
 @app.get("/api/results")
 @app.get("/results")
-async def get_live_dashboard_results():
-    """Calculates real-time totals filtered by month and updates the Summary sheet."""
+async def get_results():
     try:
-        spreadsheet = get_authorized_google_client()
-        active_month_filter = get_target_voting_month(spreadsheet)
+        cfg = fetch_app_config()
+        if not cfg["show_results"]: return {"active_month": cfg["active_month"], "data": [], "hidden": True}
+        doc = get_spreadsheet()
+        v_sheet = doc.worksheet("Votaciones")
+        all_votes = v_sheet.get_all_records()
+        names = v_sheet.row_values(1)[4:]
         
-        voting_log_sheet = spreadsheet.worksheet(SHEET_VOTING_LOG)
-        all_voting_records = voting_log_sheet.get_all_records()
-        header_names = voting_log_sheet.row_values(1)
-        donghua_columns = header_names[4:] # Extract names starting from column E
-
-        # Read existing summary to maintain manual 'Votos Patreon' values
-        manual_patreon_voters_memory = {}
+        manual_v = {}
         try:
-            summary_sheet = spreadsheet.worksheet(SHEET_NAME_SUMMARY)
-            existing_rows = summary_sheet.get_all_records()
-            for row in existing_rows:
-                name = row.get("Donghua")
-                value = row.get("Votos Patreon")
-                if name and str(value).isdigit():
-                    manual_patreon_voters_memory[name] = int(value)
-        except Exception:
-            pass
+            res_sheet = doc.worksheet("Resumen")
+            for r in res_sheet.get_all_records():
+                if r.get("Donghua") and str(r.get("Votos Patreon")).isdigit():
+                    manual_v[r["Donghua"]] = int(r["Votos Patreon"])
+        except: pass
 
-        frontend_response_list = []
-        excel_formatted_rows = [["Donghua", "Patrocinio", "x2", "Votos Patreon", "Total votos"]]
-
-        for index, donghua_name in enumerate(donghua_columns):
-            # Map Excel column letters: E (69), F, G...
-            col_letter = chr(69 + index) if index <= 21 else "A" + chr(65 + (index - 22))
-            
-            # Calculate sum of points assigned in the app for the current month
-            points_app_total = 0
-            for record in all_voting_records:
-                if str(record.get("Fecha", "")).startswith(active_month_filter):
-                    points_app_total += int(record.get(donghua_name) or 0)
-            
-            # Use manual value from Excel if present, otherwise 0
-            current_patreon_manual = manual_patreon_voters_memory.get(donghua_name, 0)
-            
-            # Logic: Total = (Patrocinio points * 2) + manual Patreon points
-            final_score = (points_app_total * 2) + current_patreon_manual
-
-            # Build Excel formulas for live updates in Google Sheets
-            row_pointer = len(frontend_response_list) + 2
-            excel_formula_patrocinio = f'=SUM(Votaciones!{col_letter}:{col_letter})'
-            excel_formula_x2 = f'=B{row_pointer} * 2'
-            excel_formula_total = f'=C{row_pointer} + D{row_pointer}'
-
-            frontend_response_list.append({
-                "Donghua": donghua_name,
-                "Patrocinio": points_app_total,
-                "x2": points_app_total * 2,
-                "VotosPatreon": current_patreon_manual,
-                "Total": final_score
-            })
-            
-            excel_formatted_rows.append([
-                donghua_name, 
-                excel_formula_patrocinio, 
-                excel_formula_x2, 
-                current_patreon_manual, 
-                excel_formula_total
-            ])
+        summary = []
+        excel_data = [["Donghua", "Patrocinio", "x2", "Votos Patreon", "Total votos"]]
+        for i, name in enumerate(names):
+            col = chr(69+i) if i<=21 else "A"+chr(65+(i-22))
+            pts = sum(int(r.get(name) or 0) for r in all_votes if str(r.get("Fecha","")).startswith(cfg["active_month"]))
+            man = manual_v.get(name, 0)
+            row_idx = len(summary) + 2
+            summary.append({"Donghua":name, "Patrocinio":pts, "x2":pts*2, "VotosPatreon":man, "Total":(pts*2)+man})
+            excel_data.append([name, f'=SUM(Votaciones!{col}:{col})', f'=B{row_idx}*2', man, f'=C{row_idx}+D{row_idx}'])
         
-        # Calculate Grand Totals footer
-        total_data_rows = len(excel_formatted_rows)
-        excel_formatted_rows.append([
-            "Votos totales", 
-            f"=SUM(B2:B{total_data_rows})", 
-            f"=SUM(C2:C{total_data_rows})", 
-            f"=SUM(D2:D{total_data_rows})", 
-            f"=SUM(E2:E{total_data_rows})"
-        ])
-
-        # Write data back to Spreadsheet for admin visibility
+        last = len(excel_data)
+        excel_data.append(["Votos totales", f"=SUM(B2:B{last})", f"=SUM(C2:C{last})", f"=SUM(D2:D{last})", f"=SUM(E2:E{last})"])
         try:
-            summary_sheet = spreadsheet.worksheet(SHEET_NAME_SUMMARY)
-            summary_sheet.clear()
-            summary_sheet.update(range_name='A1', values=excel_formatted_rows, value_input_option='USER_ENTERED')
-        except Exception:
-            pass
-        
-        return {"active_month": active_month_filter, "data": frontend_response_list}
-    except Exception as error:
-        print(f"ERROR calculating results: {error}")
-        return {"active_month": "", "data": []}
+            r_sheet = doc.worksheet("Resumen")
+            r_sheet.clear(); r_sheet.update(range_name='A1', values=excel_data, value_input_option='USER_ENTERED')
+        except: pass
+        return {"active_month": cfg["active_month"], "data": summary}
+    except: return {"active_month": "", "data": []}
 
 @app.post("/api/submit")
 @app.post("/submit")
-async def process_patreon_vote(submission: VoteSubmissionSchema):
-    """Stores or replaces a vote in the Spreadsheet log."""
+async def submit_vote(vote: VoteSchema):
     try:
-        spreadsheet = get_authorized_google_client()
-        active_target_month = get_target_voting_month(spreadsheet)
-        normalized_email = submission.email.strip().lower()
+        cfg = fetch_app_config()
+        if not cfg["is_voting_enabled"]: return {"status":"error", "message":"Cerrado."}
+        if vote.overwrite and not cfg["can_edit_votes"]: return {"status":"error", "message":f"Expiró el {cfg['edit_deadline']}"}
         
-        # Ensure the log sheet exists
-        try:
-            voting_log_sheet = spreadsheet.worksheet(SHEET_VOTING_LOG)
-        except Exception:
-            voting_log_sheet = spreadsheet.add_worksheet(title=SHEET_VOTING_LOG, rows="1000", cols="100")
-            voting_log_sheet.append_row(["Fecha", "Email", "Nick", "Tier"])
+        doc = get_spreadsheet()
+        v_sheet = doc.worksheet("Votaciones")
+        all_logs = v_sheet.get_all_records()
+        email_clean = vote.email.strip().lower()
+        
+        dup_idx = -1
+        for i, r in enumerate(all_logs):
+            if str(r.get("Email")).strip().lower() == email_clean and str(r.get("Fecha")).startswith(cfg["active_month"]):
+                dup_idx = i + 2; break
+        
+        if dup_idx != -1:
+            if not vote.overwrite: return {"status": "needs_confirmation"}
+            else: v_sheet.delete_rows(dup_idx)
 
-        # Prevent double voting in the same month
-        existing_logs = voting_log_sheet.get_all_records()
-        found_duplicate_at_row = -1
-        for index, entry in enumerate(existing_logs):
-            if str(entry.get("Email")).strip().lower() == normalized_email and str(entry.get("Fecha")).startswith(active_target_month):
-                found_duplicate_at_row = index + 2
-                break
+        master = doc.worksheet("ListaDeDonghuas")
+        series = [r[1] for r in master.get_all_values()[1:] if len(r)>1]
+        headers = v_sheet.row_values(1)
+        new_h = list(headers)
+        mod = False
+        for s in series:
+            if s not in new_h: new_h.append(s); mod = True
+        if mod: v_sheet.update(range_name='A1', values=[new_h]); headers = new_h
 
-        if found_duplicate_at_row != -1:
-            if not submission.overwrite:
-                return {"status": "needs_confirmation"}
-            else:
-                voting_log_sheet.delete_rows(found_duplicate_at_row)
-
-        # Synchronize headers with the master donghua list
-        catalog_sheet = spreadsheet.worksheet(SHEET_MASTER_LIST)
-        master_series_list = [row[1] for row in catalog_sheet.get_all_values()[1:] if len(row) > 1]
-        
-        current_sheet_headers = voting_log_sheet.row_values(1)
-        sync_headers_list = list(current_sheet_headers)
-        headers_were_modified = False
-        
-        for series_name in master_series_list:
-            if series_name not in sync_headers_list:
-                sync_headers_list.append(series_name)
-                headers_were_modified = True
-        
-        if headers_were_modified:
-            voting_log_sheet.update(range_name='A1', values=[sync_headers_list])
-            current_sheet_headers = sync_headers_list
-
-        # Prepare the data row for insertion
-        new_vote_row = [None] * len(current_sheet_headers)
-        new_vote_row[0:4] = [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-            normalized_email, 
-            submission.nick.strip(), 
-            submission.tier
-        ]
-        
-        for series_name, point_amount in submission.votes.items():
-            if point_amount > 0 and series_name in current_sheet_headers:
-                header_index = current_sheet_headers.index(series_name)
-                new_vote_row[header_index] = point_amount
-        
-        voting_log_sheet.append_row(new_vote_row)
+        row = [None]*len(headers)
+        row[0:4] = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), email_clean, vote.nick.strip(), vote.tier]
+        for name, p in vote.votes.items():
+            if p>0 and name in headers: row[headers.index(name)] = p
+        v_sheet.append_row(row)
         return {"status": "success"}
-    except Exception as error:
-        print(f"CRITICAL SYSTEM ERROR during submission: {traceback.format_exc()}")
-        return {"status": "error", "message": "Fallo técnico al procesar el voto."}
+    except: return {"status":"error", "message":"Error."}
 
 if __name__ == "__main__":
     import uvicorn
