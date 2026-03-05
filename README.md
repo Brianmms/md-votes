@@ -25,11 +25,30 @@ El ID se encuentra en la URL de tu Google Sheet:
 Copia la parte entre `/d/` y `/edit`.
 
 ### 2. Configurar Service Account (MD_SVC)
-1. Crea un proyecto en [Google Cloud Console](https://console.cloud.google.com/).
-2. Habilita las APIs de **Google Sheets** y **Google Drive**.
-3. Crea una **Service Account**, genera una clave **JSON** y descárgala.
-4. **IMPORTANTE:** Comparte tu archivo de Google Sheets con el email de la Service Account como **Editor**.
-5. Copia el contenido completo del JSON en una sola línea para la variable `MD_SVC`.
+Este paso permite que la App "hable" con tu Excel de forma segura:
+1. Entra a [Google Cloud Console](https://console.cloud.google.com/).
+2. **Crea un Proyecto:** Haz clic en el selector de proyectos (arriba a la izquierda) y dale a "Nuevo proyecto". Ponle un nombre (ej: `md-votes-api`).
+3. **Habilita las APIs:** 
+   - Busca "Google Sheets API" en la barra superior y dale a "Habilitar".
+   - Busca "Google Drive API" y dale a "Habilitar" también.
+4. **Crea la Cuenta de Servicio:**
+   - Ve al menú lateral: **IAM y administración > Cuentas de servicio**.
+   - Haz clic en "+ Crear cuenta de servicio".
+   - Ponle un nombre (ej: `mundo-donghua-svc`) y dale a "Crear y continuar".
+   - (Opcional) En roles, puedes poner "Editor", aunque no es obligatorio aquí. Dale a "Listo".
+5. **Genera la Clave JSON:**
+   - En la lista de cuentas de servicio, haz clic en el email de la que acabas de crear.
+   - Ve a la pestaña **Claves** (Keys) > **Agregar clave** > **Crear clave nueva**.
+   - Selecciona **JSON** y dale a "Crear". Se descargará un archivo `.json` a tu PC.
+   - **⚠️ SEGURIDAD:** Este archivo contiene tu clave privada. **NUNCA** lo compartas, ni lo subas a GitHub, ni lo envíes por chat. Es el acceso total a tu integración.
+6. **Vincula el Excel (CRÍTICO):** 
+   - Abre tu archivo JSON descargado y busca el campo `"client_email"`.
+   - Copia ese email (ej: `algo@proyecto.iam.gserviceaccount.com`).
+   - Ve a tu Google Sheet, dale al botón **Compartir** y pega ese email dándole permisos de **Editor**.
+7. **Configura la Variable:** 
+   - Copia todo el contenido del archivo JSON.
+   - En Vercel (o en tu `.env` local), pégalo como el valor de `MD_SVC`. 
+   - **Tip:** Asegúrate de que quede en una sola línea y sin comillas adicionales que puedan romper el formato.
 
 ## 💻 Desarrollo Local
 
