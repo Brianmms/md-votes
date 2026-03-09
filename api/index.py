@@ -68,9 +68,22 @@ async def get_donghuas():
 @app.get("/api/results")
 @app.get("/results")
 async def get_results():
-    # El puente devuelve los resultados ya calculados o los calculamos aqui
-    # Para simplicidad inicial, devolvemos vacio o implementamos logica similar
-    return {"active_month": "", "data": [], "hidden": False}
+    """Obtiene los resultados calculados directamente desde el puente."""
+    try:
+        response = requests.get(f"{APPS_SCRIPT_URL}?action=getResults")
+        results_data = response.json()
+        
+        # Necesitamos el mes activo para el título del Front
+        config = fetch_application_config()
+        
+        return {
+            "active_month": config.get("active_month", ""),
+            "data": results_data,
+            "hidden": not config.get("show_results", True)
+        }
+    except Exception as e:
+        print(f"Error results bridge: {e}")
+        return {"active_month": "", "data": [], "hidden": False}
 
 @app.post("/api/submit")
 @app.post("/submit")
